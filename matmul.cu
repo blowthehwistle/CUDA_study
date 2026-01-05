@@ -156,6 +156,72 @@ __global__ void blocktiling_1D_matmul_kernel(const float* A, const float* B, flo
 }
 
 
+// ==========================================
+// 4. 1D Blocktiling for Calculating multiple results per Thread
+// ==========================================
+
+
+// 표준 행렬 곱셈: C(M x N) = A(M x K) * B(K x N)
+__global__ void blocktiling_2D_matmul_kernel(const float* A, const float* B, float* C, int M, int N, int K) {
+
+    __shared__ float As[BLOCK_SIZE * BLOCK_SIZE];
+    __shared__ float Bs[BLOCK_SIZE * BLOCK_SIZE];
+
+    float threadResults[TM * TN] = {0.0};    //TM size만한 배열 선언 (in Register)
+    
+    float regM[TM] = {0.0};
+    float regN[TN] = {0.0};
+
+    int cRow = blockIdx.y;
+    int cCol = blockIdx.x;
+    int threadRow = threadIdx.y;
+    int threadCol = threadIdx.x;
+    
+    int alpha = 1;
+    int beta = 1;
+    // 범위 체크 (M행 N열)
+    if(cRow >= M || cCol >= N)
+        return;
+    
+    A += cRow * BLOCK_SIZE * K; // 아래 방향으로 이동 (내 담당 row 찾기 위해)
+    B += cCol * BLOCK_SIZE; // 오른쪽으로 이동 (내 담당 col 찾기 위해)
+    C += cRow * BLOCK_SIZE * N + cCol * BLOCK_SIZE; //아래방향으로 + 오른쪽 방향으로 갈 칸 수
+
+
+    float tmp = 0.0f;
+    for(uint bkIdx=0; bkIdx<K; bkIdx+=BK){   // 타일 단위 움직임 
+        for(uint loadOffset = 0; loadOffset < BM; loadOffset += strideA){
+            As[(innerRowA+loadOffset)*BK+innerColA] = A[(innerRowA+loadOffset)*K+innerColA];
+        }
+
+        for(uint loadOffset = 0; loadOffset < BK; loadOffset += strideB){
+            Bs[(innerRowB+loadOffset)*BK+innerColB] = B[(innerRowB+loadOffset)*N+innerColB];
+        }
+        
+        __syncthreads();
+
+        A += BK;        // 오른쪽 방향으로 이동
+        B += BK*N;    // 아래 방향으로 이동 (짝 맞춰 계산)
+        
+        for(uint dotIdx=0; dotIdx<BK; ++dotIdx){
+            for(uint i=0; i<TM; ++i){
+                regM[i] = As[(threadRow * TM + i)*BK + dotIdx];
+            }
+            for(uint i=0; i<TN; ++i){
+                regN[i] = Bs[dotIdx * BN + threadCol * TN + i];
+            }
+            
+
+            for(uint resIdxM = 0; resIdxM < TM; ++resIdxM){
+                for(uint resIdxN=0; resIdxN < TN; ++resIdxN){
+                    threadResults[resIdxM*TN+resIdxN] += regM[resIdxM] * regN[resIdxN];
+                }
+            }
+        }
+        __syncthreads();
+    }
+}
+
 // 호스트에서 호출하는 래퍼 함수
 extern "C" void solve(const float* A, const float* B, float* C, int M, int N, int K) {
     dim3 threadsPerBlock(16, 16);
